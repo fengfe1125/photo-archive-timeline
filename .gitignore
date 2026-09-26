@@ -45,3 +45,13 @@ data/migration-backups/
 /docs/plan-0.1-0.4.md
 /ios/QA.md
 /ios/QA/
+
+# Android build artifacts and local SDK/secret configuration
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/build-log.txt
+android/.kotlin/
+*.apk
+*.aab
