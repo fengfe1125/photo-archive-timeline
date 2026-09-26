@@ -1,0 +1,9 @@
+ARCHIVE_BUNDLE_ID = com.example.photoarchive
+IPHONEOS_DEPLOYMENT_TARGET = 18.0
+SWIFT_VERSION = 6.0
+TARGETED_DEVICE_FAMILY = 1
+CODE_SIGN_STYLE = Automatic
+ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon
+
+// Machine-specific public endpoint and signing overrides; no server secrets.
+#include? "Local.xcconfig"

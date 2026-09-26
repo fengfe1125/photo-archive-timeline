@@ -1,0 +1,47 @@
+node_modules/
+dist/
+coverage/
+.env
+.DS_Store
+
+# Local media sources and generated index data
+/照片/
+data/*.db
+data/*.db-*
+data/derivatives/
+data/exports/
+
+# Temporary test and fixture files
+tmp/
+
+# Local backend/signing configuration
+ios/Local.xcconfig
+.env*
+!.env.example
+supabase/.temp/
+supabase/.branches/
+
+# Generated signed iOS packages
+/ios/build/
+
+# Local model credentials (never commit)
+.env.search.local
+
+# Cloudflare Pages build output
+site/
+
+data/migration-backups/
+
+# Local research, account-specific operations notes, and acceptance evidence
+/research/
+/docs/acceptance/
+/docs/cloud-cutover.md
+/docs/ios-design-handoff.md
+/docs/ios-design-qa.md
+/docs/ios-live-acceptance.md
+/docs/ios-local-analysis-diagnostic.json
+/docs/ios-search-acceptance.md
+/docs/ios-search-cloud-smoke.json
+/docs/plan-0.1-0.4.md
+/ios/QA.md
+/ios/QA/

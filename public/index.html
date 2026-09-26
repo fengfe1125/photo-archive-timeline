@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content="私有云端摄影档案时间线" />
+    <title>摄影档案时间线</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+  </head>
+  <body>
+    <header class="site-header">
+      <div>
+        <p class="eyebrow">PHOTO ARCHIVE · CLOUD</p>
+        <h1>摄影档案时间线</h1>
+        <p class="subtitle">与 iPhone 共用的私人摄影档案。</p>
+      </div>
+      <div class="header-actions"><span id="accountStatus"></span><button class="quiet-button" id="signOutButton" type="button" hidden>退出登录</button>
+        <button class="quiet-button" id="exportTimeline" type="button">导出全部</button>
+        <button class="refresh-button" id="refreshButton" type="button">刷新索引</button>
+      </div>
+    </header>
+
+    <section id="authPanel" class="auth-panel">
+      <h2>登录摄影档案</h2><p>使用与 iPhone 相同的邮箱账号。</p>
+      <form id="emailForm"><input id="emailInput" type="email" autocomplete="email" required placeholder="邮箱" /><button class="accent-button">发送验证码</button></form>
+      <form id="codeForm" hidden><input id="codeInput" inputmode="numeric" autocomplete="one-time-code" maxlength="6" required placeholder="6 位验证码" /><button class="accent-button">验证并登录</button></form>
+      <p id="authMessage" role="status"></p>
+    </section>
+    <main id="archiveContent" class="page-shell" hidden>
+      <section class="stats-grid" id="stats" aria-label="媒体统计">
+        <div class="stat-card"><span>媒体</span><strong>—</strong></div>
+        <div class="stat-card"><span>照片</span><strong>—</strong></div>
+        <div class="stat-card"><span>视频</span><strong>—</strong></div>
+        <div class="stat-card"><span>GPS 覆盖</span><strong>—</strong></div>
+      </section>
+
+      <section class="toolbar" aria-label="时间轴筛选">
+        <div>
+          <h2>时间轴</h2>
+          <p id="resultSummary">正在读取索引……</p>
+        </div>
+        <div class="filters">
+          <label>
+            年份
+            <select id="yearFilter">
+              <option value="">全部年份</option>
+            </select>
+          </label>
+          <label>
+            月份
+            <input id="monthFilter" type="month" />
+          </label>
+          <button class="clear-button" id="clearFilters" type="button">清除筛选</button>
+        </div>
+      </section>
+
+      <section class="map-section" aria-labelledby="mapTitle">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">PLACES</p>
+            <h2 id="mapTitle">拍摄地点</h2>
+          </div>
+          <span class="muted" id="mapSummary">正在读取 GPS……</span>
+        </div>
+        <div id="map" class="map" aria-label="照片 GPS 地图">
+          <div class="loading-state">正在加载地图……</div>
+        </div>
+      </section>
+
+      <section class="events-section" aria-labelledby="eventsTitle">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">STORIES</p>
+            <h2 id="eventsTitle">事件与旅行</h2>
+          </div>
+          <button class="accent-button" id="newEventButton" type="button">＋ 新建事件</button>
+        </div>
+        <form class="event-form hidden" id="eventForm">
+          <label>标题<input name="title" required placeholder="例如：2024 日本旅行" /></label>
+          <label>开始日期<input name="startDate" type="date" /></label>
+          <label>结束日期<input name="endDate" type="date" /></label>
+          <label>地点<input name="place" placeholder="例如：京都" /></label>
+          <label class="wide-field">说明<textarea name="description" rows="2" placeholder="这次拍摄的背景……"></textarea></label>
+          <div class="form-actions wide-field">
+            <button class="accent-button" type="submit">保存事件</button>
+            <button class="clear-button" id="cancelEvent" type="button">取消</button>
+          </div>
+        </form>
+        <div class="events-list" id="eventsList">
+          <p class="muted">还没有事件。可以从时间轴详情中把媒体加入事件。</p>
+        </div>
+      </section>
+
+      <section id="timeline" class="timeline" aria-live="polite">
+        <div class="loading-state">正在加载照片……</div>
+      </section>
+    </main>
+
+    <div class="modal-backdrop hidden" id="detailModal" role="presentation">
+      <section class="detail-modal" role="dialog" aria-modal="true" aria-labelledby="detailTitle">
+        <button class="close-button" id="closeModal" type="button" aria-label="关闭">×</button>
+        <div id="detailContent"></div>
+      </section>
+    </div>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

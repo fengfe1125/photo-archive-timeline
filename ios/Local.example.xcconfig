@@ -1,0 +1,6 @@
+// Copy to Local.xcconfig (gitignored). Never put a service_role/secret key here.
+ARCHIVE_BUNDLE_ID = com.yourcompany.photoarchive.dev
+DEVELOPMENT_TEAM = YOUR_TEAM_ID
+// xcconfig treats // as a comment; the empty expansion preserves the URL.
+SUPABASE_URL = https:/$()/YOUR_PROJECT.supabase.co
+SUPABASE_PUBLISHABLE_KEY = sb_publishable_YOUR_PUBLIC_KEY

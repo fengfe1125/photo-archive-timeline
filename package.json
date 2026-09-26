@@ -1,0 +1,32 @@
+{
+  "name": "photo-archive-timeline",
+  "version": "0.4.0",
+  "private": true,
+  "type": "module",
+  "description": "Supabase-backed photo and video archive with manual media import and static web client.",
+  "scripts": {
+    "dev": "tsx src/cli.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/cli.js",
+    "test": "vitest run tests",
+    "typecheck": "tsc --noEmit",
+    "cloud:import": "tsx src/cloud-import.ts",
+    "cloud:build": "node scripts/build-site.mjs",
+    "test:edge": "deno test --config supabase/functions/deno.json --allow-env --allow-read --allow-write --allow-net supabase/functions/_shared/search-contract.test.ts supabase/functions/_shared/search-handler.test.ts supabase/functions/_shared/search-database.test.ts"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "2.99.3",
+    "better-sqlite3": "^11.10.0",
+    "fflate": "^0.8.3",
+    "sharp": "^0.35.4",
+    "tus-js-client": "4.3.1"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.10.0",
+    "esbuild": "0.28.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
