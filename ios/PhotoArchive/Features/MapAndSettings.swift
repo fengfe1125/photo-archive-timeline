@@ -3,16 +3,18 @@ import SwiftUI
 
 struct ArchiveMapView: View {
   @Environment(ArchiveStore.self) private var store
+  @Environment(PhotoSearchController.self) private var search
   @State private var selected: String?
   @State private var clusters: [PhotoMapCluster] = []
   @State private var loading = true
   @State private var mediaIDs: [String] = []
-  private var revision: String { "\(store.live?.owner ?? "demo"):\(store.searchRevision)" }
+  @State private var clusterIndex = PhotoMapIndex()
+  private var revision: String { "\(store.live?.owner ?? "demo"):\(store.searchRevision):\(store.archiveReady)" }
   var body: some View {
     VStack(spacing: 0) {
       Text(store.isDemo ? "虚构样例坐标 · 不请求定位" : "按区域汇总照片 · 不请求设备实时定位")
         .font(.caption).padding().frame(maxWidth: .infinity).background(ArchiveStyle.tint)
-      if loading {
+      if !store.archiveReady || (loading && clusters.isEmpty) {
         ProgressView("正在整理照片位置").frame(maxWidth: .infinity, maxHeight: .infinity)
       } else if clusters.isEmpty {
         ContentUnavailableView("没有带位置的照片", systemImage: "map", description: Text("无 GPS 的照片不会生成地图标记。"))
@@ -22,6 +24,7 @@ struct ArchiveMapView: View {
             Marker("\(group.mediaIDs.count) 张照片", coordinate: CLLocationCoordinate2D(latitude: group.latitude, longitude: group.longitude)).tag(group.id)
           }
         }.mapStyle(.standard(elevation: .flat))
+          .onMapCameraChange(frequency: .continuous) { _ in search.userDidInteract() }
         if let group = clusters.first(where: { $0.id == selected }) {
           NavigationLink {
             MapPhotoList(mediaIDs: group.mediaIDs)
@@ -35,40 +38,65 @@ struct ArchiveMapView: View {
       }
     }.background(ArchiveStyle.background).navigationTitle("地图")
       .task(id: revision) {
-        loading = true; selected = nil; clusters = []; mediaIDs = []
+        guard store.archiveReady else { return }
+        loading = true
         let items = store.media
         let corrections = store.snapshot.corrections
-        let work = Task.detached(priority: .userInitiated) {
-          let points = items.compactMap { item -> PhotoMapPoint? in
-            let correction = corrections[item.id]
-            let place = correction?.effectivePlaceMode == .clear ? nil : correction?.effectivePlaceMode == .value ? correction?.place : item.originalPlace
-            guard let lat = place?.latitude, let lon = place?.longitude else { return nil }
-            return PhotoMapPoint(id: item.id, latitude: lat, longitude: lon)
-          }
-          return PhotoMapCluster.build(points)
+        guard let result = try? await clusterIndex.update(owner: store.live?.owner ?? "demo", items: items, corrections: corrections), !Task.isCancelled else { return }
+        if !clusters.elementsEqual(result, by: { $0.id == $1.id && $0.latitude == $1.latitude && $0.longitude == $1.longitude && $0.mediaIDs == $1.mediaIDs }) {
+          clusters = result
+          mediaIDs = result.flatMap(\.mediaIDs)
+          if !result.contains(where: { $0.id == selected }) { selected = nil }
         }
-        let result = await withTaskCancellationHandler { await work.value } onCancel: { work.cancel() }
-        guard !Task.isCancelled else { return }
-        clusters = result; mediaIDs = result.flatMap(\.mediaIDs); loading = false
+        loading = false
       }
   }
 }
 
 private struct MapPhotoList: View {
   @Environment(ArchiveStore.self) private var store
+  @Environment(PhotoSearchController.self) private var search
+  @State private var context: LibraryNavigationContext?
+  @State private var opened: MediaItem?
   let mediaIDs: [String]
-  var body: some View {
-    List(mediaIDs, id: \.self) { id in
-      if let item = store.item(id) {
-        NavigationLink { PhotoDetailView(initialID: id, mediaIDs: mediaIDs) } label: {
-          HStack {
-            SampleImage(item: item).frame(width: 60, height: 60).clipped()
-            Text(item.title)
-          }
-        }
-      }
-    }.navigationTitle("位置照片")
+  private var query: LibraryQuery { LibraryQuery(includedIDs: Set(mediaIDs)) }
+  private var reloadKey: MapListRevision {
+    MapListRevision(query: query, revision: store.libraryRevision, owner: store.live?.owner ?? "demo")
   }
+  var body: some View {
+    Group {
+      if let context {
+        MediaGrid(items: context.items, effectiveDays: context.effectiveDays,
+          library: store.live?.photos,
+          remoteURL: { id in try await store.live?.cloudMediaURL(for: id, preview: true) },
+          onOpen: { opened = $0 }, onLoadMore: { Task { await context.loadNext() } },
+          onInteraction: { search.userDidInteract() }, onScrolling: { search.setScrolling($0) })
+          .overlay { if context.loading && context.items.isEmpty { ProgressView() } }
+          .safeAreaInset(edge: .bottom) {
+            if let error = context.error {
+              VStack { Text(error).font(.footnote); Button("重新加载") { Task { await context.reload() } } }.padding()
+            }
+          }
+      } else { ProgressView() }
+    }.navigationTitle("位置照片")
+      .task(id: reloadKey) {
+        if context?.query != query || context?.owner != (store.live?.owner ?? "demo") {
+          context = LibraryNavigationContext(store: store, query: query)
+        }
+        await context?.reload()
+      }
+      .onDisappear { search.setScrolling(false) }
+      .onChange(of: store.live?.owner) { _, _ in opened = nil }
+      .navigationDestination(item: $opened) { item in
+        PhotoDetailView(initialID: item.id, mediaIDs: context?.mediaIDs ?? mediaIDs, libraryContext: context)
+      }
+  }
+}
+
+private struct MapListRevision: Hashable {
+  var query: LibraryQuery
+  var revision: Int
+  var owner: String
 }
 
 struct SettingsView: View {
@@ -85,8 +113,11 @@ struct SettingsView: View {
         LabeledContent("账号", value: "尚未接入")
         LabeledContent("Supabase 同步", value: "尚未接入")
       }
+      Section("搜索与本地准备") {
+        NavigationLink("任务与搜索设置") { SearchTaskSettingsView() }
+      }
       Section("隐私") {
-        Text("整理信息同步不等于照片备份。当前版本没有上传功能。")
+        Text("整理信息同步不等于照片备份。演示模式不会上传照片。")
         Text("分享只发送已去除元数据的公开样片，不附带档案中的虚构 GPS。")
       }
       Section("调试场景 · 不是真实服务") {

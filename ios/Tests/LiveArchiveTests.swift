@@ -87,7 +87,7 @@ final class LiveArchiveTests: XCTestCase {
     XCTAssertEqual(document.outbox[0].payload.mediaIDs, [canonical])
     XCTAssertEqual(document.outbox[0].payload.coverID, canonical)
   }
-  @MainActor func testSwiftDataAtomicSaveQueueAndAccountIsolation() throws {
+  @MainActor func testSwiftDataAtomicSaveQueueAndAccountIsolation() async throws {
     let directory = URL.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: directory) }
     let repo = try LiveArchiveRepository(directory: directory)
@@ -95,20 +95,57 @@ final class LiveArchiveTests: XCTestCase {
     let story = Story(id: storyID, title: "Saved offline", mediaIDs: [mediaID], coverID: mediaID)
     doc.snapshot.stories = [story]
     doc.enqueue(entity: "story", id: storyID, payload: .story(story))
-    try repo.save(doc, owner: "guest")
+    try await repo.save(doc, owner: "guest")
     let reopened = try LiveArchiveRepository(directory: directory)
-    XCTAssertEqual(try reopened.load(owner: "guest"), doc)
+    let restored = try await reopened.load(owner: "guest")
+    XCTAssertEqual(restored, doc)
     var invalid = doc; invalid.snapshot.stories[0].coverID = "missing"
-    XCTAssertThrowsError(try repo.save(invalid, owner: "guest"))
-    XCTAssertEqual(try repo.load(owner: "guest"), doc)
-    let account = try repo.adoptGuest(into: "account-a")
+    do { try await repo.save(invalid, owner: "guest"); XCTFail("Invalid transaction must fail") } catch {}
+    let unchanged = try await repo.load(owner: "guest")
+    XCTAssertEqual(unchanged, doc)
+    let account = try await repo.adoptGuest(into: "account-a")
     XCTAssertTrue(account.syncEnabled)
     XCTAssertEqual(account.outbox, doc.outbox)
-    XCTAssertTrue(try repo.load(owner: "guest").snapshot.stories.isEmpty)
-    XCTAssertTrue(try repo.load(owner: "account-b").outbox.isEmpty)
-    XCTAssertEqual(try repo.load(owner: "account-a").snapshot, doc.snapshot)
+    let guest = try await repo.load(owner: "guest")
+    let other = try await repo.load(owner: "account-b")
+    let saved = try await repo.load(owner: "account-a")
+    XCTAssertTrue(guest.snapshot.stories.isEmpty)
+    XCTAssertTrue(other.outbox.isEmpty)
+    XCTAssertEqual(saved.snapshot, doc.snapshot)
     XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: directory.path).contains { $0.hasPrefix("guest-backup-") })
   }
+  @MainActor func testUnifiedSaveGateRejectsConcurrentCommandsAndReopensAfterFailure() async throws {
+    let repository = SuspendedArchiveSaveRepository()
+    let store = ArchiveStore(repository: repository)
+    await store.load()
+    var story = store.snapshot.stories[0]; story.title = "First submission"
+    let first = Task { await store.saveStory(story) }
+    await repository.waitUntilSaving()
+    XCTAssertTrue(store.saving)
+    let duplicate = await store.saveStory(story)
+    let correction = await store.saveCorrection(nil, for: "sample-10")
+    let removal = await store.deleteStory(story.id)
+    XCTAssertFalse(duplicate); XCTAssertFalse(correction); XCTAssertFalse(removal)
+    let count = await repository.calls
+    XCTAssertEqual(count, 1, "Only the admitted submission may reach storage")
+    await repository.finish(failing: false)
+    let firstResult = await first.value
+    XCTAssertTrue(firstResult); XCTAssertFalse(store.saving)
+    XCTAssertEqual(store.snapshot.stories[0].title, "First submission")
+    let failed = Task { await store.deleteStory(story.id) }
+    await repository.waitUntilSaving()
+    XCTAssertTrue(store.saving)
+    await repository.finish(failing: true)
+    let failedResult = await failed.value
+    XCTAssertFalse(failedResult); XCTAssertFalse(store.saving)
+    XCTAssertEqual(store.snapshot.stories.count, 1, "A failure must preserve the saved document")
+    let retry = Task { await store.saveCorrection(nil, for: "sample-10") }
+    await repository.waitUntilSaving()
+    await repository.finish(failing: false)
+    let retried = await retry.value
+    XCTAssertTrue(retried); XCTAssertFalse(store.saving)
+  }
+
   @MainActor func testShareBitmapStripsPrivateMetadataAndCanBeCleaned() throws {
     let image = UIGraphicsImageRenderer(size: CGSize(width: 32, height: 32)).image { context in
       UIColor.red.setFill(); context.fill(CGRect(x: 0, y: 0, width: 32, height: 32))
@@ -153,5 +190,32 @@ final class LiveArchiveTests: XCTestCase {
     correction.dayMode = .value; correction.day = ArchiveDay(2020, 2, 29)
     _ = await store.saveCorrection(correction, for: item.id)
     XCTAssertEqual(store.day(item), ArchiveDay(2020, 2, 29))
+  }
+}
+
+private actor SuspendedArchiveSaveRepository: ArchiveRepository {
+  private var snapshot = SampleLibrary.seed
+  private var pending: CheckedContinuation<Void, Error>?
+  private var waiting: [CheckedContinuation<Void, Never>] = []
+  private(set) var calls = 0
+  func load() async throws -> ArchiveSnapshot { snapshot }
+  func reset() async throws -> ArchiveSnapshot { snapshot }
+  func save(_ value: ArchiveSnapshot) async throws {
+    calls += 1
+    try await withCheckedThrowingContinuation { continuation in
+      pending = continuation
+      let ready = waiting; waiting = []
+      for waiter in ready { waiter.resume() }
+    }
+    snapshot = value
+  }
+  func waitUntilSaving() async {
+    guard pending == nil else { return }
+    await withCheckedContinuation { waiting.append($0) }
+  }
+  func finish(failing: Bool) {
+    let continuation = pending; pending = nil
+    if failing { continuation?.resume(throwing: ArchiveError.invalidData) }
+    else { continuation?.resume() }
   }
 }

@@ -2,59 +2,68 @@ import SwiftUI
 
 struct PhotoDetailView: View {
   @Environment(ArchiveStore.self) private var store
+  @Environment(PhotoSearchController.self) private var search
   let initialID: String
   let mediaIDs: [String]
+  let libraryContext: LibraryNavigationContext?
   @State private var currentID: String
   @State private var info = false
   @State private var storyDraft: Story?
   @State private var choosingStory = false
-  init(initialID: String, mediaIDs: [String]) {
+  init(initialID: String, mediaIDs: [String], libraryContext: LibraryNavigationContext? = nil) {
     self.initialID = initialID
     self.mediaIDs = mediaIDs
+    self.libraryContext = libraryContext
     _currentID = State(initialValue: initialID)
   }
-  private var detailWindow: [String] {
-    guard !mediaIDs.isEmpty else { return [] }
-    let index = mediaIDs.firstIndex(of: currentID) ?? 0
-    return Array(mediaIDs[max(0, index - 1)...min(mediaIDs.count - 1, index + 1)])
-  }
+  private var navigationIDs: [String] { libraryContext?.mediaIDs ?? mediaIDs }
+  private func item(_ id: String) -> MediaItem? { store.item(id) ?? libraryContext?.item(id) }
   var body: some View {
-    VStack(spacing: 12) {
-      TabView(selection: $currentID) {
-        ForEach(detailWindow, id: \.self) { id in
-          if let item = store.item(id) {
+    VStack(spacing: 0) {
+      MediaDetailPager(mediaIDs: navigationIDs, currentID: $currentID) { id, active in
+        Group {
+          if let item = item(id) {
             VStack(spacing: 20) {
-              if let live = store.live { LiveMediaView(item: item, active: currentID == id, live: live) }
+              if let live = store.live { LiveMediaView(item: item, active: active, live: live) }
               else { Image(item.assetName).resizable().scaledToFit().accessibilityLabel(item.title) }
               if store.isDemo && item.kind == .video {
                 ContentUnavailableView(
                   "视频暂不可播放", systemImage: "video.slash", description: Text("此处仅演示媒体类型，尚未接入视频文件。"))
               }
-            }.tag(id)
+            }
           }
-        }
-      }.tabViewStyle(.page(indexDisplayMode: .never))
-      if let item = store.item(currentID) {
-        VStack(spacing: 8) {
-          Text(store.day(item)?.label ?? "日期待确认").font(.headline)
-          Text(store.place(item)?.name ?? "没有位置信息").font(.footnote).foregroundStyle(.secondary)
-          if let notes = store.snapshot.corrections[item.id]?.description, !notes.isEmpty {
-            Text(notes).font(.body)
+        }.environment(store).environment(search)
+      }
+      if let item = item(currentID) {
+        HStack(alignment: .center, spacing: 16) {
+          VStack(alignment: .leading, spacing: 4) {
+            Text(store.day(item)?.label ?? "日期待确认").font(.subheadline.weight(.medium))
+            Text(store.place(item)?.name ?? "没有位置信息").font(.caption).foregroundStyle(.secondary)
           }
-          Text("\((mediaIDs.firstIndex(of: currentID) ?? 0) + 1) / \(mediaIDs.count) · 左右滑动浏览")
-            .font(.caption)
-          Button("加入故事", systemImage: "book.closed") { choosingStory = true }.buttonStyle(.bordered)
-        }.padding(.bottom)
+          Spacer(minLength: 0)
+          Button("加入故事", systemImage: "book.badge.plus") { choosingStory = true }
+            .labelStyle(.iconOnly).frame(minWidth: 44, minHeight: 44).disabled(!store.archiveReady)
+        }.padding(.horizontal, 20).padding(.vertical, 12).background(ArchiveStyle.tint)
       }
     }.background(ArchiveStyle.background)
-      .navigationTitle(store.item(currentID)?.title ?? "照片").navigationBarTitleDisplayMode(.inline)
+      .navigationTitle(item(currentID)?.title ?? "照片").navigationBarTitleDisplayMode(.inline)
+      .toolbar(.hidden, for: .tabBar)
+      .onAppear { search.setDetailPresented(true) }
+      .onDisappear { search.setDetailPresented(false) }
+      .task(id: currentID) {
+        search.userDidInteract()
+        if let context = libraryContext,
+          let index = context.mediaIDs.firstIndex(of: currentID),
+          index >= context.mediaIDs.count - 3 { await context.loadNext() }
+      }
       .toolbar {
         ToolbarItem(placement: .topBarTrailing) {
           Button("照片信息", systemImage: "info.circle") { info = true }.accessibilityIdentifier(
             "photo-info")
+            .disabled(!store.archiveReady)
         }
         ToolbarItem(placement: .bottomBar) {
-          if store.isDemo, let item = store.item(currentID), item.kind == .photo {
+          if store.isDemo, let item = item(currentID), item.kind == .photo {
             ShareLink(
               item: Image(item.assetName),
               preview: SharePreview(item.title, image: Image(item.assetName))
@@ -63,7 +72,7 @@ struct PhotoDetailView: View {
         }
       }
       .sheet(isPresented: $info) {
-        if let item = store.item(currentID) {
+        if let item = item(currentID) {
           PhotoInfoView(item: item).presentationDetents([.medium, .large])
             .presentationDragIndicator(.visible)
         }
@@ -84,6 +93,7 @@ struct PhotoDetailView: View {
 
 struct PhotoInfoView: View {
   @Environment(ArchiveStore.self) private var store
+  @Environment(PhotoSearchController.self) private var search
   @Environment(\.dismiss) private var dismiss
   let item: MediaItem
   @State private var editing = false
@@ -102,6 +112,15 @@ struct PhotoInfoView: View {
           Text(item.originalPlace?.name ?? "没有 GPS")
           Text(item.source).font(.footnote)
           if store.snapshot.corrections[item.id] != nil { Button("恢复原始值") { restoring = true } }
+        }
+        if let analysis = search.analyses[item.id] {
+          Section("识别依据") {
+            if !analysis.labels.isEmpty {
+              Text(analysis.labels.joined(separator: "、")).font(.subheadline)
+            }
+            if !analysis.description.isEmpty { Text(analysis.description) }
+            if let failure = analysis.failureReason { Text(failure).foregroundStyle(.secondary) }
+          }
         }
         Section("所属故事") {
           let stories = store.snapshot.stories.filter { $0.mediaIDs.contains(item.id) }
@@ -186,7 +205,7 @@ struct MetadataEditor: View {
         }
         Text("只修正档案，不修改系统原件。修改地点名称后不沿用旧坐标。")
         if let error = store.error { Text(error).foregroundStyle(.red) }
-      }.navigationTitle("修正信息").navigationBarTitleDisplayMode(.inline)
+      }.disabled(store.saving).navigationTitle("修正信息").navigationBarTitleDisplayMode(.inline)
         .toolbar {
           ToolbarItem(placement: .cancellationAction) {
             Button("取消") { if dirty { discard = true } else { dismiss() } }.disabled(store.saving)

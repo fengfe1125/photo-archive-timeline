@@ -2,6 +2,7 @@ import SwiftUI
 
 @main struct PhotoArchiveApp: App {
   @State private var store: ArchiveStore?
+  @State private var search = PhotoSearchController()
   @State private var startupError: String?
   @Environment(\.scenePhase) private var scenePhase
   init() {
@@ -10,8 +11,21 @@ import SwiftUI
       "PhotoArchive", isDirectory: true)
     let testing = args.contains("-ui-testing")
     if testing || args.contains("-demo") {
+      #if DEBUG
+      if testing && args.contains("-paging-test-library") {
+        let library = PerformanceLibrary()
+        _store = State(initialValue: ArchiveStore(
+          repository: JSONArchiveRepository(directory: base.appendingPathComponent("UITestsPaging"),
+            mediaIDs: Set(library.media.map(\.id)), seed: PerformanceLibrary.seed),
+          library: library))
+      } else {
+        let folder = testing ? "UITests" : "Demo"
+        _store = State(initialValue: ArchiveStore(repository: JSONArchiveRepository(directory: base.appendingPathComponent(folder))))
+      }
+      #else
       let folder = testing ? "UITests" : "Demo"
       _store = State(initialValue: ArchiveStore(repository: JSONArchiveRepository(directory: base.appendingPathComponent(folder))))
+      #endif
     } else {
       do {
         let liveFolder = args.contains("-live-ui-testing") ? "LiveUITests" : "Live"
@@ -27,7 +41,7 @@ import SwiftUI
   var body: some Scene {
     WindowGroup {
       if let store {
-      RootView().environment(store).tint(.accentColor)
+      RootView().environment(store).environment(search).tint(.accentColor)
         .task {
           if ProcessInfo.processInfo.arguments.contains("-ui-testing")
             && ProcessInfo.processInfo.arguments.contains("-reset-test-data")
@@ -37,7 +51,14 @@ import SwiftUI
             await store.load()
           }
         }
+        .task(id: "\(store.live?.account.userID ?? "guest"):\(store.live?.owner ?? "demo"):\(store.searchRevision):\(store.archiveReady)") {
+          search.prepareIdentity(store.isDemo ? "demo" : store.live?.account.userID ?? "guest")
+          guard store.archiveReady else { return }
+          await search.attach(store)
+          search.setForeground(scenePhase == .active, store: store)
+        }
         .onChange(of: scenePhase) { _, phase in
+          search.setForeground(phase == .active, store: store)
           if phase == .active { Task { await store.live?.foreground() } }
         }
       } else { ContentUnavailableView("档案暂时无法读取", systemImage: "externaldrive.badge.exclamationmark", description: Text(startupError ?? "请重新启动 App。")) }
@@ -47,6 +68,7 @@ import SwiftUI
 
 struct RootView: View {
   @Environment(ArchiveStore.self) private var store
+  @Environment(PhotoSearchController.self) private var search
   @AppStorage("hasBrowsedSamples") private var started = false
   @State private var reset = false
   var body: some View {
@@ -90,7 +112,11 @@ struct RootView: View {
   }
   private var mainTabs: some View {
         TabView {
-          Tab("图库", systemImage: "photo.on.rectangle.angled") { NavigationStack { LibraryView() } }
+          Tab("图库", systemImage: "photo.on.rectangle.angled") {
+            NavigationStack {
+              LibraryView(onInteraction: { search.userDidInteract() }, onScrolling: { search.setScrolling($0) })
+            }
+          }
           Tab("找照片", systemImage: "magnifyingglass") { NavigationStack { PhotoSearchView() } }
           Tab("故事", systemImage: "book.closed") { NavigationStack { StoriesView() } }
           Tab("地图", systemImage: "map") { NavigationStack { ArchiveMapView() } }

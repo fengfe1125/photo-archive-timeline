@@ -2,12 +2,14 @@ import SwiftUI
 
 struct StoriesView: View {
   @Environment(ArchiveStore.self) private var store
+  @Environment(PhotoSearchController.self) private var search
   @State private var draft: Story?
   var body: some View {
     ScrollView {
-      LazyVStack(alignment: .leading, spacing: 24) {
-        Text("把散落的瞬间，装订成故事。").font(.footnote).foregroundStyle(.secondary)
-        if store.snapshot.stories.isEmpty {
+      LazyVStack(alignment: .leading, spacing: 28) {
+        if !store.archiveReady {
+          ProgressView("正在准备故事").frame(maxWidth: .infinity)
+        } else if store.snapshot.stories.isEmpty {
           ContentUnavailableView(
             "还没有故事", systemImage: "book.closed", description: Text("点右上角加号，选几张照片开始。"))
         }
@@ -20,16 +22,20 @@ struct StoriesView: View {
                 SampleImage(item: item).frame(height: 210).clipped().clipShape(
                   .rect(cornerRadius: 16))
               }
-              Text(story.title).font(.title2.bold())
-              Text("\(story.count) 张 · \(story.description)").font(.footnote).foregroundStyle(
-                .secondary)
-            }.padding(16).background(ArchiveStyle.surface, in: .rect(cornerRadius: 20))
+              Text(story.title).font(.title3.weight(.semibold))
+              Text("\(story.count) 张照片").font(.subheadline).foregroundStyle(.secondary)
+              if !story.description.isEmpty {
+                Text(story.description).font(.subheadline).foregroundStyle(.secondary).lineLimit(2)
+              }
+            }
           }.buttonStyle(.plain).accessibilityIdentifier("story-\(story.id)")
         }
-      }.padding(24)
+      }.padding(20)
     }.background(ArchiveStyle.background).navigationTitle("故事")
+      .onScrollPhaseChange { _, phase in search.setScrolling(phase != .idle) }
+      .onDisappear { search.setScrolling(false) }
       .toolbar {
-        Button("新建故事", systemImage: "plus") { draft = Story(title: "", mediaIDs: [], coverID: nil) }
+        Button("新建故事", systemImage: "plus") { draft = Story(title: "", mediaIDs: [], coverID: nil) }.disabled(!store.archiveReady)
       }
       .sheet(item: $draft) { StoryEditor(story: $0) }
   }
@@ -37,32 +43,38 @@ struct StoriesView: View {
 
 struct StoryDetailView: View {
   @Environment(ArchiveStore.self) private var store
+  @Environment(PhotoSearchController.self) private var search
   @Environment(\.accessibilityReduceMotion) private var reduced
   @State private var editing: Story?
   @State private var deleting = false
+  @State private var readingDescription = false
+  @State private var opened: MediaItem?
   @Environment(\.dismiss) private var dismiss
   let id: String
   var body: some View {
     if let story = store.snapshot.stories.first(where: { $0.id == id }) {
-      ScrollView {
-        VStack(alignment: .leading, spacing: 20) {
+      VStack(alignment: .leading, spacing: 0) {
+        HStack(alignment: .top, spacing: 16) {
           if let cover = story.coverID, let item = store.item(cover) {
-            SampleImage(item: item).aspectRatio(1.4, contentMode: .fit).id(cover).transition(.opacity)
+            SampleImage(item: item).frame(width: 72, height: 72).clipped().clipShape(.rect(cornerRadius: 8)).id(cover)
               .accessibilityIdentifier("story-cover-\(cover)")
           }
-          Text(story.title).font(.largeTitle.bold())
-          Text("\(story.count) 张照片").accessibilityIdentifier("story-count")
-          Text(story.description).foregroundStyle(.secondary)
-          ForEach(story.mediaIDs, id: \.self) { mediaID in
-            if let item = store.item(mediaID) {
-              NavigationLink {
-                PhotoDetailView(initialID: mediaID, mediaIDs: story.mediaIDs)
-              } label: {
-                PhotoTile(item: item)
-              }.buttonStyle(.plain)
+          VStack(alignment: .leading, spacing: 6) {
+            Text(story.title).font(.title2.weight(.semibold))
+            Text("\(story.count) 张照片").font(.subheadline).foregroundStyle(.secondary).accessibilityIdentifier("story-count")
+            if !story.description.isEmpty {
+              Text(story.description).font(.subheadline).foregroundStyle(.secondary).lineLimit(3)
+              Button("阅读完整说明") { readingDescription = true }.font(.subheadline)
             }
           }
-        }.padding(24).animation(reduced ? nil : .easeOut(duration: 0.18), value: story.coverID)
+          Spacer(minLength: 0)
+        }.padding(20)
+        MediaGrid(items: story.mediaIDs.compactMap { store.item($0) },
+          library: store.live?.photos,
+          remoteURL: { id in try await store.live?.cloudMediaURL(for: id, preview: true) },
+          groupByDate: false,
+          onOpen: { opened = $0 }, onInteraction: { search.userDidInteract() },
+          onScrolling: { search.setScrolling($0) })
       }.background(ArchiveStyle.background).navigationTitle("故事").navigationBarTitleDisplayMode(
         .inline
       )
@@ -74,6 +86,16 @@ struct StoryDetailView: View {
         Button("删除故事", role: .destructive) { Task { if await store.deleteStory(id) { dismiss() } } }
       }
       .sheet(item: $editing) { StoryEditor(story: $0) }
+      .sheet(isPresented: $readingDescription) {
+        NavigationStack {
+          ScrollView { Text(story.description).frame(maxWidth: .infinity, alignment: .leading).padding(20).textSelection(.enabled) }
+            .navigationTitle("故事说明").navigationBarTitleDisplayMode(.inline)
+            .toolbar { Button("完成") { readingDescription = false } }
+        }
+      }
+      .navigationDestination(item: $opened) { item in
+        PhotoDetailView(initialID: item.id, mediaIDs: story.mediaIDs)
+      }
     } else {
       ContentUnavailableView("故事不存在", systemImage: "book.closed")
     }
@@ -82,11 +104,14 @@ struct StoryDetailView: View {
 
 struct StoryEditor: View {
   @Environment(ArchiveStore.self) private var store
+  @Environment(PhotoSearchController.self) private var search
   @Environment(\.dismiss) private var dismiss
   let original: Story
   @State private var draft: Story
   @State private var discard = false
   @State private var undo: Story?
+  @State private var addingPhotos = false
+  @State private var additions = Set<String>()
   init(story: Story) {
     original = story
     _draft = State(initialValue: story)
@@ -132,18 +157,16 @@ struct StoryEditor: View {
           }
         }
         Section("添加照片") {
-          ForEach(store.media.filter { !draft.mediaIDs.contains($0.id) }) { item in
-            Button {
-              draft.mediaIDs.append(item.id)
-              draft.normalize()
-            } label: {
-              Label(item.title, systemImage: "plus.circle")
-            }
-          }
+          Button("从图库选择", systemImage: "photo.badge.plus") {
+            additions = []; addingPhotos = true
+          }.disabled(draft.count >= 5_000).accessibilityIdentifier("story-add-photos")
         }
         Text("移出故事只取消关联，不删除媒体。取消编辑不会改变已保存的故事。").font(.footnote)
         if let error = store.error { Text(error).foregroundStyle(.red) }
       }.environment(\.editMode, .constant(.active))
+        .disabled(store.saving)
+        .onScrollPhaseChange { _, phase in search.setScrolling(phase != .idle) }
+        .onDisappear { search.setScrolling(false) }
         .navigationTitle(original.title.isEmpty ? "新建故事" : "编辑故事").navigationBarTitleDisplayMode(
           .inline
         )
@@ -161,6 +184,15 @@ struct StoryEditor: View {
           }
         }
         .interactiveDismissDisabled(draft != original || store.saving)
+        .onChange(of: draft) { search.userDidInteract() }
+        .sheet(isPresented: $addingPhotos) {
+          MediaPicker(selection: $additions,
+            query: LibraryQuery(excludedIDs: Set(draft.mediaIDs)), maximumItems: 5_000 - draft.count) { ids in
+              let existing = Set(draft.mediaIDs)
+              draft.mediaIDs.append(contentsOf: ids.filter { !existing.contains($0) })
+              draft.normalize(); addingPhotos = false
+            }
+        }
         .confirmationDialog("放弃未保存的故事修改？", isPresented: $discard, titleVisibility: .visible) {
           Button("放弃修改", role: .destructive) { dismiss() }
         }

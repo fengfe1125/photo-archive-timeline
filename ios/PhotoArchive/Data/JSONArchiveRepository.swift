@@ -2,19 +2,25 @@ import Foundation
 
 actor JSONArchiveRepository: ArchiveRepository {
   let directory: URL
+  private let mediaIDs: Set<String>
+  private let seed: ArchiveSnapshot
   private var file: URL { directory.appendingPathComponent("archive-v1.json") }
-  init(directory: URL) { self.directory = directory }
+  init(directory: URL, mediaIDs: Set<String> = Set(SampleLibrary().media.map(\.id)), seed: ArchiveSnapshot = SampleLibrary.seed) {
+    self.directory = directory
+    self.mediaIDs = mediaIDs
+    self.seed = seed
+  }
   func load() throws -> ArchiveSnapshot {
     guard FileManager.default.fileExists(atPath: file.path) else {
-      try save(SampleLibrary.seed)
-      return SampleLibrary.seed
+      try save(seed)
+      return seed
     }
     let snapshot = try JSONDecoder().decode(ArchiveSnapshot.self, from: Data(contentsOf: file))
-    try snapshot.validate(mediaIDs: Set(SampleLibrary().media.map(\.id)))
+    try snapshot.validate(mediaIDs: mediaIDs)
     return snapshot
   }
   func save(_ snapshot: ArchiveSnapshot) throws {
-    try snapshot.validate(mediaIDs: Set(SampleLibrary().media.map(\.id)))
+    try snapshot.validate(mediaIDs: mediaIDs)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -26,7 +32,7 @@ actor JSONArchiveRepository: ArchiveRepository {
       try FileManager.default.copyItem(
         at: file, to: directory.appendingPathComponent("backup-\(UUID().uuidString).json"))
     }
-    try save(SampleLibrary.seed)
-    return SampleLibrary.seed
+    try save(seed)
+    return seed
   }
 }

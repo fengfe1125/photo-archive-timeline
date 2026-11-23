@@ -2,6 +2,14 @@ import XCTest
 @testable import PhotoArchive
 
 final class SearchTests: XCTestCase {
+  func testLocalLakeEvidenceIsCertainAndWeakLabelsStayPossible() {
+    let query = LocalSearchParser.parse("湖边", current: .init())
+    var analysis = SearchAnalysis(version: "known-evidence")
+    analysis.state = "ready"; analysis.labels = ["lake", "outdoor"]
+    XCTAssertEqual(SearchMatcher.match(query, day: nil, place: "", hour: nil, analysis: analysis, screenshot: false), .match)
+    analysis.labels = ["outdoor", "night_sky", "sky"]
+    XCTAssertEqual(SearchMatcher.match(query, day: nil, place: "", hour: nil, analysis: analysis, screenshot: false), .possible)
+  }
   func testMapClusteringKeepsPhotosAndBoundsMarkers() {
     let points = (0..<240).map { PhotoMapPoint(id: String($0), latitude: Double($0 % 120) - 60, longitude: Double($0) - 120) }
     let groups = PhotoMapCluster.build(points, limit: 40)
@@ -59,16 +67,19 @@ final class SearchTests: XCTestCase {
     var q = PhotoSearchQuery(); q.start = "2025-02-30"; XCTAssertThrowsError(try q.validate())
     q.start = "2025-03-01"; q.end = "2025-02-01"; XCTAssertThrowsError(try q.validate())
   }
-  func testIndependentIndexPersistenceAndOwnerIsolation() throws {
+  func testIndependentIndexPersistenceAndOwnerIsolation() async throws {
     let base = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     defer { try? FileManager.default.removeItem(at: base) }
-    let a = try SearchRepository(base: base, owner: "a"), b = try SearchRepository(base: base, owner: "b")
+    let a = SearchRepository(base: base, owner: "a"), b = SearchRepository(base: base, owner: "b")
     var p = SearchPreferences(); p.albums = [SearchAlbum(name: "春节", query: .init())]
-    try a.write(p, id: "preferences")
-    try a.write(SearchAnalysis(version: "version-1"), id: "photo-1")
-    XCTAssertEqual(try a.read(SearchPreferences.self, id: "preferences")?.albums.first?.name, "春节")
-    XCTAssertNil(try b.read(SearchPreferences.self, id: "preferences"))
-    XCTAssertEqual(try SearchRepository(base: base, owner: "a").read(SearchAnalysis.self, id: "photo-1")?.version, "version-1")
+    try await a.write(p, id: "preferences")
+    try await a.write(SearchAnalysis(version: "version-1"), id: "photo-1")
+    let own = try await a.read(SearchPreferences.self, id: "preferences")
+    let other = try await b.read(SearchPreferences.self, id: "preferences")
+    let restored = try await SearchRepository(base: base, owner: "a").read(SearchAnalysis.self, id: "photo-1")
+    XCTAssertEqual(own?.albums.first?.name, "春节")
+    XCTAssertNil(other)
+    XCTAssertEqual(restored?.version, "version-1")
     XCTAssertFalse(p.ai); XCTAssertFalse(p.geo)
   }
 }

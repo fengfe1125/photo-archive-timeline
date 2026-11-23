@@ -1,7 +1,7 @@
 import Foundation
 import CryptoKit
 
-struct PhotoSearchQuery: Codable, Equatable {
+struct PhotoSearchQuery: Codable, Equatable, Sendable {
   var start: String? = nil
   var end: String? = nil
   var city: String = ""
@@ -115,7 +115,7 @@ enum LocalSearchParser {
     return q
   }
 }
-struct SearchAnalysis: Codable {
+struct SearchAnalysis: Codable, Sendable {
   var version: String
   var labels: [String] = []
   var state = "pending"
@@ -124,24 +124,27 @@ struct SearchAnalysis: Codable {
   var city = ""
   var description = ""
   var visualModel = ""
+  var cloudModelVersion: String? = nil
   var decisions: [String: Double] = [:]
 }
-struct SearchAlbum: Codable, Identifiable {
+struct SearchAlbum: Codable, Identifiable, Sendable {
   var id = UUID().uuidString
   var name: String
   var query: PhotoSearchQuery
   var excluded: Set<String> = []
 }
-struct SearchPreferences: Codable {
+struct SearchPreferences: Codable, Sendable {
   var geo = false
   var ai = false
+  // Optional for compatibility with every previously saved owner preference file.
+  var localAnalysisPaused: Bool? = nil
   var albums: [SearchAlbum] = []
   var pending: [String: String] = [:]
   var modelVersion: String? = nil
 }
-enum SearchMatch { case match, possible, excluded }
+enum SearchMatch: Sendable { case match, possible, excluded }
 enum SearchMatcher {
-  static func match(_ q: PhotoSearchQuery, day: String?, place: String, hour: Int?, analysis: SearchAnalysis?, screenshot: Bool) -> SearchMatch {
+  static func match(_ q: PhotoSearchQuery, day: String?, place: String, hour: Int?, analysis: SearchAnalysis?, screenshot: Bool, queryKey: String? = nil) -> SearchMatch {
     var missing = q.needsYear
     if q.start != nil || q.end != nil {
       if let day { if let s = q.start, day < s { return .excluded }; if let e = q.end, day > e { return .excluded } }
@@ -155,7 +158,7 @@ enum SearchMatcher {
     if q.exclude.contains("截图") && screenshot { return .excluded }
     if q.include.contains("截图") && !screenshot { return .excluded }
     let semantics = q.include.filter { $0 != "截图" } + q.exclude.filter { $0 != "截图" }
-    if let p = analysis?.decisions[q.key] {
+    if let p = analysis?.decisions[queryKey ?? q.key] {
       if p <= 0.2 { return .excluded }
       return !missing && p >= 0.8 ? .match : .possible
     }

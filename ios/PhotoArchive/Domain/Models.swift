@@ -55,6 +55,8 @@ struct MediaItem: Codable, Identifiable, Hashable, Sendable {
   var localIdentifier: String? = nil
   var accessible: Bool = false
   var captureDate: Date? = nil
+  /// PhotoKit content version; optional so existing archives remain readable.
+  var modificationDate: Date? = nil
 }
 
 struct MetadataCorrection: Codable, Equatable, Sendable {

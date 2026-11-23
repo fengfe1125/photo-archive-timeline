@@ -4,19 +4,34 @@ import XCTest
   func testRealPhotoKitStoryAndRestart() {
     continueAfterFailure = false
     let app = XCUIApplication()
+    // iOS can present this while XCTest is still completing the triggering tap.
+    // Handle it before XCTest's default interruption handler chooses “不允许”.
+    let monitor = addUIInterruptionMonitor(withDescription: "照片图库完整访问") { alert in
+      let allow = alert.buttons.matching(NSPredicate(format:
+        "label == '允许完全访问' OR label == 'Allow Full Access'")).firstMatch
+      guard allow.exists else { return false }
+      allow.tap()
+      return true
+    }
+    defer { removeUIInterruptionMonitor(monitor) }
     app.resetAuthorizationStatus(for: .photos)
     app.launchArguments = ["-live-ui-testing", "-reset-live-test-data", "-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_CN"]
     app.launch()
     XCTAssertTrue(app.buttons["select-mode"].waitForExistence(timeout: 30))
-    let authorize = app.buttons["选择照片访问范围"]
-    if authorize.waitForExistence(timeout: 5) {
-      authorize.tap()
-      let system = XCUIApplication(bundleIdentifier: "com.apple.springboard")
-      let allow = system.buttons.matching(NSPredicate(format: "label CONTAINS '完全访问' OR label CONTAINS '全部照片' OR label CONTAINS 'Full Access'")).firstMatch
-      XCTAssertTrue(allow.waitForExistence(timeout: 10))
+    let system = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+    let allow = system.alerts.buttons.matching(NSPredicate(format:
+      "label == '允许完全访问' OR label == 'Allow Full Access'")).firstMatch
+    if allow.waitForExistence(timeout: 3) {
       allow.tap()
+    } else if !app.staticTexts["完整照片访问"].exists {
+      let authorize = app.buttons["选择照片访问范围"]
+      XCTAssertTrue(authorize.waitForExistence(timeout: 10))
+      authorize.tap()
+      // The interruption monitor may already have handled it during authorize.tap().
+      if allow.waitForExistence(timeout: 3) { allow.tap() }
     }
-    let photo = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'photo-' AND identifier != 'photo-info'")).firstMatch
+    XCTAssertTrue(app.staticTexts["完整照片访问"].waitForExistence(timeout: 15), "必须实际授予完整照片权限，不能跳过或拒绝授权")
+    let photo = app.cells.matching(NSPredicate(format: "identifier BEGINSWITH 'photo-'")).firstMatch
     XCTAssertTrue(photo.waitForExistence(timeout: 30), "Seed public test photos and grant this test app photo permission before running")
     let imageID = photo.identifier
     photo.tap()
@@ -27,7 +42,7 @@ import XCTest
     app.buttons["close-info"].tap()
     app.navigationBars.buttons.element(boundBy: 0).tap()
     app.buttons["select-mode"].tap()
-    app.buttons[imageID.replacingOccurrences(of: "photo-", with: "select-")].tap()
+    app.cells[imageID.replacingOccurrences(of: "photo-", with: "select-")].tap()
     app.buttons["用 1 张照片创建故事"].tap()
     let title = app.textFields["story-title"]
     XCTAssertTrue(title.waitForExistence(timeout: 10))

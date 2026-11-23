@@ -19,7 +19,7 @@ import XCTest
     add(a)
   }
   func testPhotoSheetReturnsToSameDetailAndLibrary() {
-    let photo = app.buttons["photo-sample-10"]
+    let photo = app.cells["photo-sample-10"]
     XCTAssertTrue(photo.waitForExistence(timeout: 10))
     screenshot("01-library")
     photo.tap()
@@ -32,11 +32,46 @@ import XCTest
     XCTAssertTrue(photo.waitForExistence(timeout: 5))
     screenshot("03-return-library")
   }
+  func testLargeTextLibraryUsesTwoColumns() {
+    app.terminate()
+    app.launchArguments += ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"]
+    app.launch()
+    let first = app.cells["photo-sample-10"]
+    let second = app.cells["photo-sample-11"]
+    let third = app.cells["photo-sample-12"]
+    XCTAssertTrue(first.waitForExistence(timeout: 10))
+    XCTAssertTrue(second.isHittable)
+    XCTAssertEqual(first.frame.midY, second.frame.midY, accuracy: 2)
+    XCTAssertLessThan(first.frame.midX, second.frame.midX)
+    XCTAssertEqual(first.frame.midX, third.frame.midX, accuracy: 2)
+    XCTAssertGreaterThan(third.frame.midY, first.frame.midY)
+    let date = app.staticTexts["media-date-2023-9-21"]
+    XCTAssertTrue(date.exists)
+    XCTAssertTrue(date.label.contains("21"))
+    XCTAssertGreaterThan(date.frame.height, 50, "最大字号日期标题应完整换行")
+    screenshot("library-accessibility-two-columns")
+  }
+  func testMapPhotosOpenSharedGridAndDetail() {
+    app.tabBars.buttons["地图"].tap()
+    let photos = app.buttons["查看全部 3 张有位置照片"]
+    XCTAssertTrue(photos.waitForExistence(timeout: 10))
+    photos.tap()
+    let first = app.cells["photo-sample-10"]
+    XCTAssertTrue(first.waitForExistence(timeout: 5))
+    XCTAssertTrue(app.cells["photo-sample-11"].exists)
+    XCTAssertTrue(app.cells["photo-sample-13"].exists)
+    XCTAssertFalse(app.cells["photo-sample-12"].exists, "无坐标照片不能进入地图结果")
+    screenshot("map-shared-photo-grid")
+    first.tap()
+    XCTAssertTrue(app.buttons["photo-info"].waitForExistence(timeout: 5))
+    app.navigationBars.buttons.element(boundBy: 0).tap()
+    XCTAssertTrue(first.waitForExistence(timeout: 5))
+  }
   func testCreateStoryAndPersistence() {
     XCTAssertTrue(app.buttons["select-mode"].waitForExistence(timeout: 10))
     app.buttons["select-mode"].tap()
-    app.buttons["select-sample-10"].tap()
-    app.buttons["select-sample-11"].tap()
+    app.cells["select-sample-10"].tap()
+    app.cells["select-sample-11"].tap()
     app.buttons["用 2 张照片创建故事"].tap()
     let title = app.textFields["story-title"]
     XCTAssertTrue(title.waitForExistence(timeout: 5))
@@ -65,8 +100,13 @@ import XCTest
     title.typeText(" changed")
     app.buttons["取消"].tap()
     app.buttons["放弃修改"].tap()
+    XCTAssertTrue(title.waitForNonExistence(timeout: 5))
     XCTAssertEqual(app.staticTexts["story-count"].label, "6 张照片")
-    app.tabBars.buttons["图库"].tap()
+    let libraryTab = app.tabBars.buttons["图库"]
+    let ready = XCTNSPredicateExpectation(predicate: NSPredicate(format: "isHittable == true"), object: libraryTab)
+    XCTAssertEqual(XCTWaiter.wait(for: [ready], timeout: 5), .completed)
+    libraryTab.tap()
+    XCTAssertTrue(app.buttons["设置"].waitForExistence(timeout: 5))
     app.buttons["设置"].tap()
     app.swipeUp()
     app.buttons["重置示例数据"].tap()
@@ -74,7 +114,7 @@ import XCTest
     screenshot("06-reset-confirmation")
   }
   func testMetadataSaveAndRestore() {
-    app.buttons["photo-sample-10"].tap()
+    app.cells["photo-sample-10"].tap()
     app.buttons["photo-info"].tap()
     app.buttons["edit-metadata"].tap()
     let field = app.textFields["metadata-notes"]
@@ -128,7 +168,7 @@ import XCTest
     screenshot("09-demo-sync-shared")
   }
   func testDragAndInteractiveZoom() {
-    let photo = app.buttons["photo-sample-10"]
+    let photo = app.cells["photo-sample-10"]
     XCTAssertTrue(photo.waitForExistence(timeout: 10))
     photo.tap()
     // Begin a short interactive dismissal then reverse it; the system owns cancellation.

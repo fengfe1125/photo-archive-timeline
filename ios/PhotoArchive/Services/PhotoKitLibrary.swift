@@ -4,65 +4,145 @@ import UIKit
 import AVFoundation
 import Observation
 
+struct PhotoLibraryDelta: Sendable {
+  var upserts: [MediaItem]
+  var inaccessibleIDs: Set<String>
+  var isFullSnapshot: Bool
+}
+
 @MainActor protocol PhotoLibraryAccessProviding {
   var authorization: PHAuthorizationStatus { get }
   func requestAuthorization() async
   func read(previous: [String: MediaItem]) async -> [MediaItem]
 }
 
+private struct PhotoScanResult: @unchecked Sendable {
+  var delta: PhotoLibraryDelta
+}
+
 @MainActor @Observable final class PhotoKitLibrary: NSObject, PhotoLibraryAccessProviding, PHPhotoLibraryChangeObserver {
   private(set) var authorization = PHPhotoLibrary.authorizationStatus(for: .readWrite)
   private(set) var scanning = false
   private(set) var scanned = 0
+  var cacheNamespace = "guest" { didSet { if oldValue != cacheNamespace { MediaPipeline.shared.clear() } } }
   @ObservationIgnored var onChange: (() -> Void)?
-  @ObservationIgnored let manager = PHCachingImageManager()
+  @ObservationIgnored let manager = MediaPipeline.shared.manager
   @ObservationIgnored private var observing = false
+  @ObservationIgnored private var fetchResult: PHFetchResult<PHAsset>?
+  @ObservationIgnored private var pendingChanged = Set<String>()
+  @ObservationIgnored private var pendingRemoved = Set<String>()
+  @ObservationIgnored private var needsFullRead = true
+  @ObservationIgnored private var changeRevision = 0
+  @ObservationIgnored private var scanTask: Task<PhotoScanResult, Error>?
+  @ObservationIgnored private var scanID = UUID()
   override init() { super.init() }
   nonisolated func photoLibraryDidChange(_ changeInstance: PHChange) {
-    Task { @MainActor [weak self] in self?.onChange?() }
+    Task { @MainActor [weak self] in self?.accept(changeInstance) }
+  }
+  private func accept(_ change: PHChange) {
+    guard let fetchResult else {
+      needsFullRead = true; changeRevision &+= 1; scanTask?.cancel(); onChange?(); return
+    }
+    guard let details = change.changeDetails(for: fetchResult) else { return }
+    self.fetchResult = details.fetchResultAfterChanges
+    changeRevision &+= 1
+    if details.hasIncrementalChanges {
+      let updated = Set(details.insertedObjects.map(\.localIdentifier) + details.changedObjects.map(\.localIdentifier))
+      let removed = Set(details.removedObjects.map(\.localIdentifier))
+      pendingChanged.subtract(removed); pendingChanged.formUnion(updated)
+      pendingRemoved.subtract(updated); pendingRemoved.formUnion(removed)
+      MediaPipeline.shared.invalidate(localIdentifiers: updated.union(removed))
+    } else { needsFullRead = true; MediaPipeline.shared.reduceMemory() }
+    scanTask?.cancel()
+    onChange?()
   }
   func requestAuthorization() async {
-    authorization = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
+    let next = await PHPhotoLibrary.requestAuthorization(for: .readWrite)
+    if authorization != next { needsFullRead = true }
+    authorization = next
   }
+  /// Compatibility for callers that still expect a complete accessible snapshot.
   func read(previous: [String: MediaItem]) async -> [MediaItem] {
-    authorization = PHPhotoLibrary.authorizationStatus(for: .readWrite)
-    guard authorization == .authorized || authorization == .limited else { return [] }
+    do {
+      let delta = try await readChanges(previous: previous)
+      var next = previous
+      for id in delta.inaccessibleIDs { next[id]?.accessible = false }
+      for item in delta.upserts { next[item.id] = item }
+      return next.values.filter(\.accessible)
+    } catch { return previous.values.filter(\.accessible) }
+  }
+  func readChanges(previous: [String: MediaItem]) async throws -> PhotoLibraryDelta {
+    let latestAuthorization = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+    if authorization != latestAuthorization { needsFullRead = true; MediaPipeline.shared.clear() }
+    authorization = latestAuthorization
+    scanTask?.cancel()
+    let token = UUID(); scanID = token
+    guard authorization == .authorized || authorization == .limited else {
+      fetchResult = nil; needsFullRead = true; pendingChanged = []; pendingRemoved = []
+      scanning = false
+      return PhotoLibraryDelta(upserts: [], inaccessibleIDs: Set(previous.values.filter(\.accessible).map(\.id)), isFullSnapshot: true)
+    }
     if !observing { PHPhotoLibrary.shared().register(self); observing = true }
+    let full = needsFullRead || fetchResult == nil
+    if !full && pendingChanged.isEmpty && pendingRemoved.isEmpty {
+      return PhotoLibraryDelta(upserts: [], inaccessibleIDs: [], isFullSnapshot: false)
+    }
+    let baseline = fetchResult
+    let changed = pendingChanged, removed = pendingRemoved, revision = changeRevision
     scanning = true; scanned = 0
-    defer { scanning = false }
-    // Build metadata away from the UI actor; only publish batched progress.
-    return await Task.detached(priority: .userInitiated) { [weak self] in
-      let options = PHFetchOptions()
-      options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
-      options.predicate = NSPredicate(format: "mediaType == %d OR mediaType == %d", PHAssetMediaType.image.rawValue, PHAssetMediaType.video.rawValue)
-      let assets = PHAsset.fetchAssets(with: options)
+    let task = Task.detached(priority: .utility) { [weak self] () throws -> PhotoScanResult in
+      let fetched: PHFetchResult<PHAsset>
+      if full {
+        let options = PHFetchOptions()
+        options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+        options.predicate = NSPredicate(format: "mediaType == %d OR mediaType == %d", PHAssetMediaType.image.rawValue, PHAssetMediaType.video.rawValue)
+        fetched = PHAsset.fetchAssets(with: options)
+      } else if let baseline { fetched = baseline }
+      else { throw CancellationError() }
+      await self?.acceptFetchResult(fetched, token: token, revision: revision)
       let known = Dictionary(previous.values.compactMap { item in item.localIdentifier.map { ($0, item) } }, uniquingKeysWith: { first, _ in first })
-      var result: [MediaItem] = []
-      result.reserveCapacity(assets.count)
-      for start in stride(from: 0, to: assets.count, by: 200) {
-        for index in start..<min(start + 200, assets.count) {
-          let asset = assets.object(at: index)
+      let source = full ? fetched : PHAsset.fetchAssets(withLocalIdentifiers: Array(changed), options: nil)
+      var upserts: [MediaItem] = []
+      upserts.reserveCapacity(source.count)
+      var seen = Set<String>()
+      for start in stride(from: 0, to: source.count, by: 200) {
+        try Task.checkCancellation()
+        for index in start..<min(start + 200, source.count) {
+          let asset = source.object(at: index)
+          seen.insert(asset.localIdentifier)
           let old = known[asset.localIdentifier]
           let day = old?.captureDate == asset.creationDate ? old?.originalDay : asset.creationDate.map(ArchiveDay.init)
           let location = asset.location.map { Place(name: "照片位置", latitude: $0.coordinate.latitude, longitude: $0.coordinate.longitude) }
-          var item = MediaItem(id: old?.id ?? UUID().uuidString.lowercased(), assetName: "",
+          let item = MediaItem(id: old?.id ?? UUID().uuidString.lowercased(), assetName: "",
             title: day?.label ?? (asset.mediaType == .video ? "视频" : "照片"),
             kind: asset.mediaType == .video ? .video : .photo, originalDay: day,
-            originalPlace: location, source: "系统照片库", localIdentifier: asset.localIdentifier, accessible: true)
-          item.captureDate = asset.creationDate
-          result.append(item)
+            originalPlace: location, source: "系统照片库", localIdentifier: asset.localIdentifier, accessible: true,
+            captureDate: asset.creationDate, modificationDate: asset.modificationDate)
+          if old != item { upserts.append(item) }
         }
-        await self?.updateScanProgress(result.count)
+        await self?.updateScanProgress(min(start + 200, source.count), token: token)
       }
-      return result
-    }.value
+      try Task.checkCancellation()
+      let unavailable = full ? Set(known.keys).subtracting(seen) : removed
+      let ids = Set(unavailable.compactMap { known[$0]?.id })
+      return PhotoScanResult(delta: PhotoLibraryDelta(upserts: upserts, inaccessibleIDs: ids, isFullSnapshot: full))
+    }
+    scanTask = task
+    defer { if scanID == token { scanning = false; scanTask = nil } }
+    let result = try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
+    try Task.checkCancellation()
+    guard scanID == token, revision == changeRevision else { throw CancellationError() }
+    needsFullRead = false; pendingChanged.subtract(changed); pendingRemoved.subtract(removed)
+    return result.delta
   }
-  private func updateScanProgress(_ count: Int) { scanned = count }
-
-  func asset(_ id: String?) -> PHAsset? {
-    guard let id else { return nil }
-    return PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil).firstObject
+  /// Retry reconciliation after a caller could not commit a successfully read delta.
+  func invalidateSnapshot() { needsFullRead = true }
+  func cancelScan() { scanTask?.cancel(); scanID = UUID(); scanning = false }
+  private func acceptFetchResult(_ result: PHFetchResult<PHAsset>, token: UUID, revision: Int) {
+    if scanID == token, changeRevision == revision { fetchResult = result }
   }
+  private func updateScanProgress(_ count: Int, token: UUID) { if scanID == token { scanned = count } }
+  func asset(_ id: String?) -> PHAsset? { MediaPipeline.shared.asset(id) }
   func cloudMappings(_ identifiers: [String]) async -> [String: String] {
     guard !identifiers.isEmpty else { return [:] }
     return await Task.detached(priority: .utility) {
@@ -105,6 +185,7 @@ import Observation
     if let manager, requestID != PHInvalidImageRequestID { manager.cancelImageRequest(requestID) }
     requestID = PHInvalidImageRequestID
     player?.pause(); player = nil
+    image = nil; progress = 0
     loading = false
   }
   func load(item: MediaItem, library: PhotoKitLibrary, detail: Bool, network: Bool) {

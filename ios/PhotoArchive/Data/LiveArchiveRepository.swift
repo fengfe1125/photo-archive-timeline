@@ -1,76 +1,59 @@
 import Foundation
-import SwiftData
 
-@Model final class StoredArchive {
-  @Attribute(.unique) var owner: String
-  var data: Data
-  init(owner: String, data: Data) { self.owner = owner; self.data = data }
+/// Small interface over migration, an isolated SwiftData executor and paged queries.
+/// Initialization is cheap; opening/validation/migration happens off the UI actor.
+actor LiveArchiveRepository {
+  private let directory: URL
+  private let inMemory: Bool
+  private var opening: Task<ArchiveDatabase, Error>?
+  init(directory: URL, inMemory: Bool = false) throws {
+    self.directory = directory; self.inMemory = inMemory
+  }
+  private func database() async throws -> ArchiveDatabase {
+    if let opening { return try await opening.value }
+    let directory = directory, inMemory = inMemory
+    let task = Task.detached(priority: .userInitiated) {
+      try await ArchiveMigration.open(directory: directory, inMemory: inMemory)
+    }
+    opening = task
+    do { return try await task.value }
+    catch { opening = nil; throw error }
+  }
+  func bootstrap(owner: String) async throws -> ArchiveBootstrap { try await database().bootstrap(owner: owner) }
+  func exists(owner: String) async throws -> Bool { try await database().exists(owner: owner) }
+  func load(owner: String) async throws -> LiveDocument { try await database().read(owner: owner).document }
+  func read(owner: String) async throws -> ArchiveReadModel { try await database().read(owner: owner) }
+  func save(_ document: LiveDocument, owner: String) async throws { _ = try await database().save(document, owner: owner) }
+  func update(owner: String, impact: ArchiveMutationImpact = .library,
+              _ mutation: @escaping @Sendable (inout LiveDocument) throws -> Void) async throws -> ArchiveReadModel {
+    try await database().update(owner: owner, impact: impact, mutation)
+  }
+  func adoptGuest(into owner: String) async throws -> LiveDocument {
+    try await database().adoptGuest(into: owner, backupDirectory: directory).document
+  }
+  func adoptGuestReadModel(into owner: String) async throws -> ArchiveReadModel {
+    try await database().adoptGuest(into: owner, backupDirectory: directory)
+  }
+  func remove(owner: String) async throws { try await database().remove(owner: owner) }
+  func page(owner: String, query: LibraryQuery, cursor: LibraryCursor?, limit: Int = 120) async throws -> LibraryPage {
+    try await database().page(owner: owner, query: query, cursor: cursor, limit: limit)
+  }
+  /// Explicit current-format export for recovery/rollback preparation. It includes edits made
+  /// after migration; the immutable legacy backup alone is not a safe post-upgrade rollback.
+  func exportCompatibilitySnapshot() async throws -> URL {
+    let url = directory.appendingPathComponent("compatibility-\(UUID().uuidString.lowercased()).json")
+    try await database().exportCompatibilitySnapshot(to: url)
+    return url
+  }
 }
 
-@MainActor final class LiveArchiveRepository {
-  private let container: ModelContainer
-  private let context: ModelContext
-  private let directory: URL
-  init(directory: URL, inMemory: Bool = false) throws {
-    self.directory = directory
-    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-    let config = inMemory
-      ? ModelConfiguration(isStoredInMemoryOnly: true, cloudKitDatabase: .none)
-      : ModelConfiguration(url: directory.appendingPathComponent("archive.store"), cloudKitDatabase: .none)
-    container = try ModelContainer(for: StoredArchive.self, configurations: config)
-    context = ModelContext(container)
-    context.autosaveEnabled = false
-  }
-  private func row(_ owner: String) throws -> StoredArchive? {
-    var descriptor = FetchDescriptor<StoredArchive>(predicate: #Predicate { $0.owner == owner })
-    descriptor.fetchLimit = 1
-    return try context.fetch(descriptor).first
-  }
-  func exists(owner: String) throws -> Bool { try row(owner) != nil }
-  func load(owner: String) throws -> LiveDocument {
-    guard let row = try row(owner) else { return LiveDocument() }
-    let document = try JSONDecoder().decode(LiveDocument.self, from: row.data)
-    try document.validate()
-    return document
-  }
-  func save(_ document: LiveDocument, owner: String) throws {
-    try document.validate()
-    let bytes = try JSONEncoder().encode(document)
-    do {
-      if let existing = try row(owner) { existing.data = bytes }
-      else { context.insert(StoredArchive(owner: owner, data: bytes)) }
-      try context.save()
-    } catch { context.rollback(); throw error }
-  }
-  func adoptGuest(into owner: String) throws -> LiveDocument {
-    guard owner != "guest" else { throw ArchiveError.invalidData }
-    let guest = try load(owner: "guest")
-    var account = try load(owner: owner)
-    // Save the exact previous guest document before the atomic two-owner transaction.
-    let backup = directory.appendingPathComponent("guest-backup-\(UUID().uuidString).json")
-    try JSONEncoder().encode(guest).write(to: backup, options: [.atomic, .completeFileProtection])
-    for (id, item) in guest.media where account.media[id] == nil { account.media[id] = item }
-    account.cloudIDs.merge(guest.cloudIDs) { old, _ in old }
-    for story in guest.snapshot.stories {
-      guard !account.snapshot.stories.contains(where: { $0.id == story.id }) else { continue }
-      account.snapshot.stories.append(story)
-    }
-    account.snapshot.corrections.merge(guest.snapshot.corrections) { old, _ in old }
-    for operation in guest.outbox where !account.outbox.contains(where: { $0.id == operation.id }) {
-      account.outbox.append(operation)
-    }
-    account.syncEnabled = true
-    try account.validate()
-    do {
-      let bytes = try JSONEncoder().encode(account)
-      if let row = try row(owner) { row.data = bytes } else { context.insert(StoredArchive(owner: owner, data: bytes)) }
-      if let guestRow = try row("guest") { guestRow.data = try JSONEncoder().encode(LiveDocument()) }
-      try context.save()
-      return account
-    } catch { context.rollback(); throw error }
-  }
-  func remove(owner: String) throws {
-    do { if let row = try row(owner) { context.delete(row); try context.save() } }
-    catch { context.rollback(); throw error }
+extension ArchiveDatabase {
+  func exportCompatibilitySnapshot(to url: URL) throws {
+    let snapshot = ArchiveCompatibilitySnapshot(owners: try allDocuments())
+    let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+    let bytes = try encoder.encode(snapshot)
+    try bytes.write(to: url, options: [.atomic, .completeFileProtection])
+    let check = try JSONDecoder().decode(ArchiveCompatibilitySnapshot.self, from: Data(contentsOf: url))
+    guard check.owners == snapshot.owners else { throw ArchiveStorageError.invalidMigration }
   }
 }

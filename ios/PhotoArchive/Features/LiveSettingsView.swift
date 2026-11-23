@@ -50,6 +50,11 @@ struct LiveSettingsView: View {
   var body: some View {
     Form {
       Section("照片访问") { PhotoPermissionSection(live: live) }
+      Section("搜索与本地准备") {
+        NavigationLink { SearchTaskSettingsView() } label: {
+          Label("任务与搜索设置", systemImage: "sparkle.magnifyingglass")
+        }
+      }
       Section("账号") {
         if let accountEmail = live.account.email {
           LabeledContent("已登录", value: accountEmail)
@@ -84,7 +89,7 @@ struct LiveSettingsView: View {
         if let date = live.document.lastSync { LabeledContent("最近同步") { Text(date, style: .relative) } }
         if live.document.syncEnabled {
           Button("立即同步／重试") { live.requestSync() }.disabled(live.syncing)
-          Button("暂停同步") { live.disableSync() }
+          Button("暂停同步") { Task { await live.disableSync() } }
         } else {
           Button("开启同步") { enable = true }.disabled(live.account.userID == nil || busy)
         }
@@ -133,7 +138,7 @@ struct LiveSettingsView: View {
       }
       .confirmationDialog("永久删除账号与云端整理？", isPresented: $delete, titleVisibility: .visible) {
         Button("确认删除账号", role: .destructive) { Task { await live.deleteAccount() } }
-      } message: { Text("同时删除该账号的云端原片、预览和本机档案缓存。系统照片不会删除；历史导出不受影响。") }
+      } message: { Text("同时删除该账号的云端原片、预览和当前本机档案缓存。系统照片不会删除；历史升级备份与导出不受影响。") }
   }
   private func perform(_ work: @escaping @MainActor () async throws -> Void) {
     busy = true; live.error = nil
@@ -153,8 +158,8 @@ struct ConflictListView: View {
         Section {
           ConflictVersionView(title: "本机修改", record: localVersion(conflict))
           ConflictVersionView(title: "云端版本", record: conflict.remote)
-          Button("保留本机版") { live.resolve(conflict, keepLocal: true) }
-          Button("保留云端版") { live.resolve(conflict, keepLocal: false) }
+          Button("保留本机版") { Task { await live.resolve(conflict, keepLocal: true) } }
+          Button("保留云端版") { Task { await live.resolve(conflict, keepLocal: false) } }
         }.disabled(live.syncing || live.document.outbox.contains { $0.resolving == conflict.id })
       }
       if let error = live.error { Text(error).foregroundStyle(.red) }

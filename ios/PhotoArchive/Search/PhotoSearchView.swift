@@ -1,12 +1,9 @@
 import SwiftUI
 
-// Hallmark · native existing-system adaptation: paper surfaces, system type, photo-first hierarchy.
-// Pre-emit critique: P4 H4 E4 S5 R5 V4. Runtime visual verification recorded separately.
 struct PhotoSearchView: View {
   @Environment(ArchiveStore.self) private var store
-  @Environment(\.scenePhase) private var phase
   @Environment(\.dynamicTypeSize) private var typeSize
-  @State private var search = PhotoSearchController()
+  @Environment(PhotoSearchController.self) private var search
   @State private var text = ""
   @FocusState private var searchFocused: Bool
   @State private var selection = Set<String>()
@@ -14,26 +11,23 @@ struct PhotoSearchView: View {
   @State private var editing: PhotoSearchQuery?
   @State private var showConditions = false
   @State private var showSettings = false
-  @State private var showUsage = false
   @State private var saveAlbum = false
   @State private var albumName = ""
-  @State private var download = false
-  @State private var retryBilling = false
-  @State private var diagnosticStarted = false
-  private var libraryKey: String {
-    (store.isDemo ? "demo" : store.live?.account.userID ?? "guest") + ":" + String(store.searchRevision)
-  }
+  @State private var showPossible = false
+  @State private var detail: MediaItem?
+  @State private var selecting = false
   var body: some View {
-    ScrollView {
-      LazyVStack(alignment: .leading, spacing: 22) {
+    @Bindable var search = search
+    GeometryReader { geometry in
+    VStack(spacing: 0) {
+      let controls = VStack(alignment: .leading, spacing: 12) {
         VStack(alignment: .leading, spacing: 10) {
-          Text("记得一点，就从这里找。").font(.title2.weight(.semibold))
           HStack(alignment: .top) {
             TextField("例如：去年春节在武汉的照片", text: $text, axis: .vertical)
               .focused($searchFocused).lineLimit(1...3).submitLabel(.search).accessibilityIdentifier("photo-search-input")
               .onSubmit { submit() }
             Button(action: submit) { Image(systemName: "arrow.up.circle.fill").font(.title2) }
-              .accessibilityLabel("搜索").accessibilityIdentifier("photo-search-submit").disabled(text.isEmpty || search.busy || search.loading)
+              .accessibilityLabel("搜索").accessibilityIdentifier("photo-search-submit").disabled(text.isEmpty || search.loading)
           }.padding().background(ArchiveStyle.surface, in: .rect(cornerRadius: 16))
           if !search.query.hasConditions {
             ScrollView(.horizontal, showsIndicators: false) { HStack {
@@ -45,11 +39,14 @@ struct PhotoSearchView: View {
         }
         if search.query.hasConditions || search.query.needsYear {
           VStack(alignment: .leading, spacing: 10) {
-            Text(conditionText(search.query)).font(.subheadline).accessibilityIdentifier("search-conditions")
-            HStack {
+            Text(conditionText(search.query)).font(.subheadline).fixedSize(horizontal: false, vertical: true)
+              .accessibilityIdentifier("search-conditions")
+            let actionsLayout = typeSize.isAccessibilitySize
+              ? AnyLayout(VStackLayout(alignment: .leading, spacing: 10)) : AnyLayout(HStackLayout())
+            actionsLayout {
               Button("修改条件") { editing = search.query; showConditions = true }
               Button("撤回") { search.undo(store) }.disabled(search.history.isEmpty)
-              Spacer()
+              if !typeSize.isAccessibilitySize { Spacer() }
               Button("重置") { search.reset(store); selection = [] }
             }.font(.footnote)
             if search.query.needsYear { Text("春节是哪一年？请在修改条件中选择。").foregroundStyle(.orange) }
@@ -60,7 +57,9 @@ struct PhotoSearchView: View {
           VStack(alignment: .leading, spacing: 8) {
             Text("请确认理解的条件").font(.headline)
             Text(conditionText(proposed))
-            HStack {
+            let actionsLayout = typeSize.isAccessibilitySize
+              ? AnyLayout(VStackLayout(alignment: .leading, spacing: 10)) : AnyLayout(HStackLayout())
+            actionsLayout {
               Button("采用条件") { search.update(proposed, store: store) }
               Button("修改") { editing = proposed; showConditions = true }
               Button("取消") { search.draftCloudQuery = nil }
@@ -68,77 +67,127 @@ struct PhotoSearchView: View {
           }.padding().background(ArchiveStyle.surface, in: .rect(cornerRadius: 16))
         }
         if search.loading { ProgressView("正在准备搜索索引，可随时切换页面") }
-        analysisControls
-        if let message = search.message { Text(message).font(.footnote).foregroundStyle(ArchiveStyle.secondary).accessibilityIdentifier("search-message") }
-        if !search.preferences.albums.isEmpty && search.selectedAlbumID == nil {
-          VStack(alignment: .leading, spacing: 8) {
-            Text("保存的搜索").font(.headline)
-            ForEach(search.preferences.albums) { album in
-              HStack {
-                Button { search.openAlbum(album, store: store); selection = [] } label: {
-                  Label(album.name, systemImage: "rectangle.stack").frame(maxWidth: .infinity, alignment: .leading)
-                }
-                Button(role: .destructive) { search.preferences.albums.removeAll { $0.id == album.id }; search.persistPreferences() } label: { Image(systemName: "trash") }.accessibilityLabel("删除搜索相册 \(album.name)")
-              }.padding(.vertical, 6)
-            }
+        Button { showSettings = true } label: {
+          HStack(alignment: .top) {
+            if search.busy { ProgressView().controlSize(.small) }
+            Label(search.busy ? search.progress : search.preferences.localAnalysisPaused == true ? "本地分析已暂停" : "本地准备 · 待分析 \(search.pendingCount) 张", systemImage: "sparkle.magnifyingglass")
+              .font(.caption).lineLimit(nil).fixedSize(horizontal: false, vertical: true)
+              .multilineTextAlignment(.leading).frame(maxWidth: .infinity, alignment: .leading)
+            Spacer()
+            Image(systemName: "chevron.right").font(.caption)
           }
+        }.buttonStyle(.plain).foregroundStyle(.secondary).accessibilityIdentifier("search-preparation-settings")
+        if let message = search.message {
+          Text(message).font(.footnote).foregroundStyle(ArchiveStyle.secondary)
+            .fixedSize(horizontal: false, vertical: true).accessibilityIdentifier("search-message")
+        }
+        if !search.preferences.albums.isEmpty && search.selectedAlbumID == nil {
+          Menu {
+            ForEach(search.preferences.albums) { album in
+              Button(album.name) { search.openAlbum(album, store: store); selection = [] }
+            }
+          } label: { Label("保存的搜索（\(search.preferences.albums.count)）", systemImage: "rectangle.stack") }
+            .accessibilityIdentifier("saved-search-menu")
         }
         if search.selectedAlbumID != nil {
           Text(search.preferences.albums.first { $0.id == search.selectedAlbumID }?.name ?? "搜索相册").font(.title2.bold())
-          Text("本机动态匹配 · 长按照片可从此相册排除").font(.caption).foregroundStyle(ArchiveStyle.secondary)
+          Text("本机动态匹配 · 选择照片后可从此相册排除").font(.caption).foregroundStyle(ArchiveStyle.secondary)
           Button("恢复手动排除的照片") {
             if let i = search.preferences.albums.firstIndex(where: { $0.id == search.selectedAlbumID }) { search.preferences.albums[i].excluded = []; search.persistPreferences(); search.refresh(store) }
           }.font(.footnote)
         }
-        photoSection("符合条件", items: search.matches)
-        if !search.possible.isEmpty {
-          Text("以下照片缺少日期、地区或足够的画面证据，仍有可能符合。不会因尚未分析就被隐藏。")
-            .font(.footnote).foregroundStyle(ArchiveStyle.secondary)
-          photoSection("可能相关", items: search.possible)
+        if search.query.hasConditions {
+          if typeSize.isAccessibilitySize {
+            Picker("结果类型", selection: $showPossible) {
+              Text("符合条件 · \(search.matchCount)").tag(false)
+              Text("可能相关 · \(search.possibleCount)").tag(true)
+            }.pickerStyle(.menu).labelsHidden().font(.subheadline)
+              .accessibilityLabel("结果类型").accessibilityIdentifier("search-result-kind")
+          } else {
+          Picker("结果类型", selection: $showPossible) {
+            Text("符合条件 · \(search.matchCount)").tag(false)
+            Text("可能相关 · \(search.possibleCount)").tag(true)
+          }.pickerStyle(.segmented)
+          }
+          if showPossible { Text("缺少日期、地区或足够的画面证据的照片仍会保留在这里。")
+            .font(.caption).foregroundStyle(.secondary) }
         }
-        if !search.loading && search.query.hasConditions && search.matches.isEmpty && search.possible.isEmpty {
-          ContentUnavailableView("暂未找到照片", systemImage: "magnifyingglass", description: Text("试着放宽日期或地区，或检查照片访问范围。"))
+        if !search.query.hasConditions {
+          Text("仅搜索允许访问的照片；不分析视频内容。")
+            .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
         }
-        Text("仅搜索允许访问的照片；不分析视频内容。").font(.caption).foregroundStyle(ArchiveStyle.secondary)
-      }.padding(20)
+      }.padding(.horizontal, 16).padding(.vertical, 12)
+      if typeSize.isAccessibilitySize {
+        // Only controls scroll here; the UIKit result grid remains a sibling with
+        // its own viewport and reuse/prefetch lifecycle.
+        ScrollView { controls }
+          .accessibilityIdentifier("search-controls-scroll")
+          .frame(height: search.query.hasConditions ? geometry.size.height * 0.45 : geometry.size.height)
+          .onScrollPhaseChange { _, phase in search.setScrolling(phase != .idle) }
+      } else { controls }
+      if search.query.hasConditions && !(showPossible ? search.possible : search.matches).isEmpty {
+        MediaGrid(items: showPossible ? search.possible : search.matches, effectiveDays: search.effectiveDays,
+          selection: $selection, selecting: selecting, library: store.live?.photos,
+          remoteURL: { id in try await store.live?.cloudMediaURL(for: id, preview: true) },
+          onOpen: { detail = $0 }, onLoadMore: { search.loadMore(possible: showPossible) },
+          onInteraction: { search.userDidInteract() }, onScrolling: { search.setScrolling($0) })
+      } else if search.query.hasConditions && !search.loading {
+        ScrollView {
+          ContentUnavailableView(showPossible ? "没有待确认的照片" : "暂未找到符合条件的照片", systemImage: "magnifyingglass", description: Text("试着放宽条件，或查看另一组搜索结果。"))
+        }
+      } else {
+        Spacer(minLength: 0)
+      }
+    }
     }
     .scrollDismissesKeyboard(.interactively)
     .background(ArchiveStyle.background).navigationTitle("找照片")
+    .navigationBarTitleDisplayMode(typeSize.isAccessibilitySize ? .inline : .large)
     .toolbar {
+      ToolbarItem(placement: .topBarTrailing) { Button(selecting ? "完成" : "选择") { selecting.toggle() } }
       ToolbarItem(placement: .topBarTrailing) { Button { showSettings = true } label: { Image(systemName: "slider.horizontal.3") }.accessibilityLabel("搜索设置") }
-      ToolbarItem(placement: .topBarTrailing) { Button { showUsage = true; Task { await search.loadUsage(store) } } label: { Image(systemName: "chart.bar") }.accessibilityLabel("AI 用量与费用") }
     }
     .safeAreaInset(edge: .bottom) {
+      if search.query.hasConditions || !selection.isEmpty {
       let layout = typeSize.isAccessibilitySize ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8)) : AnyLayout(HStackLayout())
       layout {
+        if !selection.isEmpty {
         Button("创建故事（\(selection.count)）") {
-          let ids = store.media.filter { selection.contains($0.id) }.map(\.id)
-          draft = Story(title: "", mediaIDs: ids, coverID: ids.first)
+          let items = store.media, selected = selection, identity = search.owner, searchID = search.searchID
+          Task {
+            let ids = await Task.detached(priority: .userInitiated) { items.filter { selected.contains($0.id) }.map(\.id) }.value
+            guard search.owner == identity, search.searchID == searchID, !Task.isCancelled else { return }
+            draft = Story(title: "", mediaIDs: ids, coverID: ids.first)
+          }
         }.buttonStyle(.borderedProminent).disabled(selection.isEmpty)
-        Button("保存搜索") { albumName = search.preferences.albums.first { $0.id == search.selectedAlbumID }?.name ?? ""; saveAlbum = true }
+        }
+        if search.selectedAlbumID != nil && !selection.isEmpty {
+          Button("排除所选") {
+            search.exclude(selection, store: store); selection = []
+          }.buttonStyle(.bordered)
+        }
+        if search.query.hasConditions {
+          Button("保存搜索") { albumName = search.preferences.albums.first { $0.id == search.selectedAlbumID }?.name ?? ""; saveAlbum = true }
           .buttonStyle(.bordered).disabled(!search.query.hasConditions || search.query.needsYear)
+        }
       }.padding().frame(maxWidth: .infinity).background(.regularMaterial)
-    }
-    .task(id: libraryKey) {
-      search.stop(); await search.attach(store); selection = selection.intersection(Set(store.media.map(\.id)))
-      #if DEBUG
-      if ProcessInfo.processInfo.arguments.contains("-verify-local-search"), !diagnosticStarted, !search.loading, !Task.isCancelled {
-        do { try await Task.sleep(for: .seconds(2)) } catch { return }
-        diagnosticStarted = true
-        search.index(store, download: ProcessInfo.processInfo.arguments.contains("-verify-local-search-download"), maximumItems: 3)
       }
-      #endif
     }
-    .onChange(of: phase) { _, p in if p != .active { search.stop() } }
-    .onDisappear { search.stop() }
+    .onChange(of: search.owner) { _, _ in
+      text = ""; selection = []; detail = nil; draft = nil; editing = nil
+      showConditions = false; showSettings = false; saveAlbum = false; albumName = ""
+      showPossible = false; selecting = false; searchFocused = false
+    }
+    .onChange(of: text) { _, _ in search.userDidInteract() }
+    .onChange(of: detail) { _, value in search.setDetailPresented(value != nil) }
+    .onDisappear { search.setScrolling(false) }
+    .navigationDestination(item: $detail) { item in
+      PhotoDetailView(initialID: item.id, mediaIDs: search.resultIDs(possible: showPossible))
+    }
     .sheet(item: $draft) { StoryEditor(story: $0) }
     .sheet(isPresented: $showConditions) { SearchConditionEditor(query: editing ?? search.query) { search.update($0, store: store) } }
-    .sheet(isPresented: $showSettings) { settings }
-    .sheet(isPresented: $showUsage) { SearchUsageView(records: search.usage, searchID: search.searchID) }
-    .alert("允许重新请求？", isPresented: $retryBilling) {
-      Button("已核对，允许重新请求", role: .destructive) { search.preferences.pending = [:]; search.persistPreferences() }
-      Button("取消", role: .cancel) { }
-    } message: { Text("这会清除失败或过期请求的本机去重凭据。之前未确认的调用可能已计费，重新分析可能再次产生费用。已保存的识别结果仍会复用。") }
+    .sheet(isPresented: $showSettings) { NavigationStack { SearchTaskSettingsView() } }
+
     .alert("保存搜索相册", isPresented: $saveAlbum) {
       TextField("相册名称", text: $albumName)
       Button("保存") { search.saveAlbum(name: albumName) }
@@ -146,6 +195,16 @@ struct PhotoSearchView: View {
     } message: { Text("保存在本机，新照片自动参与本地匹配，不会自动产生模型费用。") }
   }
   private func submit() { searchFocused = false; search.submit(text, store: store); text = ""; selection = [] }
+}
+
+struct SearchTaskSettingsView: View {
+  @Environment(ArchiveStore.self) private var store
+  @Environment(PhotoSearchController.self) private var search
+  @Environment(\.dismiss) private var dismiss
+  @Environment(\.dynamicTypeSize) private var typeSize
+  @State private var download = false
+  @State private var showUsage = false
+  @State private var retryBilling = false
   private var analysisControls: some View {
     VStack(alignment: .leading, spacing: 10) {
       if search.busy {
@@ -166,8 +225,8 @@ struct PhotoSearchView: View {
         Button("单独查询城市") { search.locate(store) }.disabled(search.loading || store.isDemo)
         Text("本地分析只识别画面；按城市搜索前，可单独查询城市。联网查询失败不会阻塞识图。").font(.caption).foregroundStyle(ArchiveStyle.secondary)
       }
-      let waiting = search.analyses.values.filter { $0.state == "waiting" }.count
-      let pending = search.analyses.values.filter { $0.state == "pending" }.count
+      let waiting = search.waitingCount
+      let pending = search.pendingCount
       Text("待本地分析 \(pending) 张 · 待下载或重试 \(waiting) 张").font(.caption).foregroundStyle(ArchiveStyle.secondary)
       if waiting > 0 && !search.busy {
         Button("下载待分析照片并继续（最多50张）") { download = true; search.index(store, download: true) }.disabled(search.loading)
@@ -179,43 +238,36 @@ struct PhotoSearchView: View {
       }
     }
   }
-  private func photoSection(_ title: String, items: [MediaItem]) -> some View {
-    VStack(alignment: .leading, spacing: 12) {
-      Text("\(title) · \(items.count)").font(.headline)
-      LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: typeSize.isAccessibilitySize ? 2 : 3), spacing: 16) {
-        ForEach(items) { item in
-          VStack(alignment: .leading, spacing: 4) {
-            Button { if selection.contains(item.id) { selection.remove(item.id) } else { selection.insert(item.id) } } label: {
-              PhotoTile(item: item, selected: selection.contains(item.id), selecting: true)
-            }.buttonStyle(.plain).accessibilityLabel("\(item.title)，\(selection.contains(item.id) ? "已选择" : "未选择")")
-            NavigationLink("查看") { PhotoDetailView(initialID: item.id, mediaIDs: items.map(\.id)) }.font(.caption)
-            if let evidence = search.analyses[item.id] {
-              if !evidence.description.isEmpty {
-                Text(evidence.description).font(.caption2).foregroundStyle(ArchiveStyle.secondary)
-              }
-              if !evidence.labels.isEmpty {
-                Text("本地标签：" + evidence.labels.sorted().joined(separator: "、"))
-                  .font(.caption2).foregroundStyle(ArchiveStyle.secondary).lineLimit(3)
-              }
+  var body: some View {
+    @Bindable var search = search
+    return Form {
+        Section("本地分析") {
+          Toggle("空闲时自动准备", isOn: Binding(get: { search.preferences.localAnalysisPaused != true }, set: { search.setAnalysisPaused(!$0) }))
+          Text("只在前台停止操作 2 秒后分析本机照片。浏览、查看大图、低电量或设备发热时暂停；不会自动下载或调用云端 AI。")
+            .font(.footnote)
+          analysisControls
+        }
+        Section("用量与费用") {
+          Button("AI 用量与费用") { showUsage = true; Task { await search.loadUsage(store) } }
+        }
+        Section("保存的搜索") {
+          ForEach(search.preferences.albums) { album in
+            HStack {
+              Text(album.name)
+              Spacer()
+              Button(role: .destructive) { search.deleteAlbum(album.id) } label: { Image(systemName: "trash") }
+                .accessibilityLabel("删除搜索相册 \(album.name)")
             }
-          }.contextMenu {
-            if search.selectedAlbumID != nil { Button("从搜索相册排除") { search.exclude(item.id, store: store); selection.remove(item.id) } }
           }
         }
-      }
-    }
-  }
-  private var settings: some View {
-    NavigationStack {
-      Form {
         Section("地区查询") {
-          Toggle("联网查询城市名称", isOn: $search.preferences.geo).onChange(of: search.preferences.geo) { _, _ in search.stop(); search.persistPreferences() }
+          Toggle("联网查询城市名称", isOn: $search.preferences.geo).onChange(of: search.preferences.geo) { _, _ in search.cancelCurrentWork(); search.persistPreferences() }
           Text("仅发送照片坐标给 Apple 地址解析服务，不发送照片。已缓存城市可以离线使用。").font(.footnote)
         }
         Section("云端 AI") {
-          Toggle("允许云端补充", isOn: $search.preferences.ai).onChange(of: search.preferences.ai) { _, _ in search.stop(); search.persistPreferences() }
+          Toggle("允许云端补充", isOn: $search.preferences.ai).onChange(of: search.preferences.ai) { _, _ in search.cancelCurrentWork(); search.persistPreferences() }
           Text("仅点击补充时发送候选缩略图给 MiniMax；搜索条件和照片描述发送给 OpenRouter / TypeSafe Jev。独立于故事同步，不设消费上限。").font(.footnote)
-          Button("已核对费用，允许重试失败请求") { retryBilling = true; showSettings = false }
+          Button("已核对费用，允许重试失败请求") { retryBilling = true }
           Text("服务端不存储图片；模型供应商可能按其政策留存数据。费用页区分实际返回与估算金额。").font(.footnote)
           Link("MiniMax 隐私政策", destination: URL(string: "https://www.minimax.io/privacy-policy")!)
           Link("OpenRouter 数据政策", destination: URL(string: "https://openrouter.ai/docs/features/privacy-and-logging")!)
@@ -228,8 +280,13 @@ struct PhotoSearchView: View {
           Toggle("本次分析允许下载缺失照片", isOn: $download)
           Text("默认只处理本机可用图片。此选项只在当前页面会话有效。").font(.footnote)
         }
-      }.navigationTitle("搜索设置").toolbar { Button("完成") { showSettings = false } }
-    }
+      }.onChange(of: search.owner) { _, _ in download = false; showUsage = false; retryBilling = false }
+        .navigationTitle("任务与搜索设置").toolbar { Button("完成") { dismiss() } }
+        .sheet(isPresented: $showUsage) { SearchUsageView(records: search.usage, searchID: search.searchID) }
+        .alert("允许重新请求？", isPresented: $retryBilling) {
+          Button("已核对，允许重新请求", role: .destructive) { search.preferences.pending = [:]; search.persistPreferences() }
+          Button("取消", role: .cancel) { }
+        } message: { Text("这会清除失败或过期请求的本机去重凭据。之前未确认的调用可能已计费，重新分析可能再次产生费用。已保存的识别结果仍会复用。") }
   }
 }
 private func conditionText(_ q: PhotoSearchQuery) -> String {
